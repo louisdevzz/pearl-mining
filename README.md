@@ -8,12 +8,12 @@ Serverless Pearl mining on Modal.com (H100/A100).
 pip install modal
 modal token set --token-id YOUR_ID --token-secret YOUR_SECRET
 
-# Akoya Pool (H100) — miner runs in a detached Modal Sandbox (not killed by modal run disconnect)
+# Akoya Pool (H100) — miner runs directly on GPU function (Dashboard shows H100)
 modal deploy akoya_modal.py
-modal run akoya_modal.py
+modal run akoya_modal.py   # keep running; logs stream here
 
-# Do NOT use `modal run --detach ...::train` for mining — SIGINT still reaches the miner.
-# Use deploy + `modal run` above instead.
+# Stop: modal app stop akoya-pearl-miner
+# Do NOT close terminal mid-run with old spawn-only flow; use remote() (default main).
 
 # Pearlhash Pool (A100)
 modal deploy pearlhash_modal.py

@@ -1,26 +1,19 @@
 """
-Akoya Pearl Miner on Modal.com — H100 via Modal Sandbox
-
-The miner runs in a detached Sandbox (separate from the short launcher Function).
-This avoids SIGINT from modal run / log disconnect killing the GPU process.
+Akoya Pearl Miner on Modal.com — H100 (direct Function, no Sandbox)
 
   modal deploy fix_akoya_modal.py
-  modal run fix_akoya_modal.py
+  modal run fix_akoya_modal.py          # blocks, shows logs, Dashboard shows H100
 
-Stop:
-  modal sandbox list
-  modal sandbox terminate <sandbox_id>
+  modal app logs akoya-pearl-miner
+  modal app stop akoya-pearl-miner
 """
-
-import shlex
-import textwrap
 
 import modal
 
 app = modal.App("akoya-pearl-miner")
 
 WALLET = "prl1pw6q2dkd5zdkf3agvfyph6u0acyg7hs7aw9klxcv5ksc5s27r3gmq5yz7yt"
-WORKER = "worker3"
+WORKER = "worker2"
 GPU = "H100"
 TIMEOUT = 86400
 
@@ -36,78 +29,79 @@ akoya_image = (
 )
 
 
-def _miner_bash() -> str:
-    w, k = shlex.quote(WALLET), shlex.quote(WORKER)
-    return textwrap.dedent(
-        f"""
-        set -euo pipefail
-        export AKOYA_POOL_WALLET={w}
-        export AKOYA_POOL_WORKER={k}
-        export AKOYA_POOL_HOST=pool-v2.akoyapool.com
-        export AKOYA_POOL_PORT=443
-        export AKOYA_POOL_USE_TLS=1
-        export AKOYA_GPU_INDICES=all
-        export AKOYA_METRICS_PORT=9100
-        export AKOYA_PEARL_GEMM_LIB=/app/lib/libpearl_gemm_capi.so
-        export AKOYA_PEARL_MINING_LIB=/app/lib/libpearl_mining_capi.so
-
-        CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)
-        MAJOR=${{CC%%.*}} MINOR=${{CC#*.}}
-        echo "[Modal] GPU compute: $MAJOR.$MINOR"
-        LIB=/app/lib
-        TARGET="$LIB/libpearl_gemm_capi.so"
-        if [ "$MAJOR" = "12" ]; then SRC=blackwell
-        elif [ "$MAJOR" = "9" ]; then SRC=h100
-        elif [ "$MAJOR" = "8" ] && [ "$MINOR" = "9" ]; then SRC=ada
-        else SRC=portable; fi
-        rm -f "$TARGET"
-        ln -s "$LIB/libpearl_gemm_capi_$SRC.so" "$TARGET"
-        echo "[Modal] Kernel: $SRC"
-        mkdir -p /var/lib/akoya-miner
-        exec /app/akoya-miner mine-blocks
-        """
-    ).strip()
-
-
-@app.function(image=akoya_image, timeout=300)
+@app.function(
+    gpu=GPU,
+    image=akoya_image,
+    timeout=TIMEOUT,
+    scaledown_window=300,
+)
 def train():
-    """Launch miner in a detached GPU Sandbox (launcher exits; Sandbox keeps mining)."""
+    import os
+    import signal
+    import subprocess
     import time
 
-    sb = modal.Sandbox.create(
-        app=app,
-        image=akoya_image,
-        gpu=GPU,
-        timeout=TIMEOUT,
-        idle_timeout=TIMEOUT,
-    )
-    from modal.sandbox import StreamType
+    # Modal may SIGINT the worker on client disconnect; don't forward to miner.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-    proc = sb.exec(
-        "bash",
-        "-lc",
-        _miner_bash(),
-        stdout=StreamType.STDOUT,
-        stderr=StreamType.STDOUT,
-    )
-    print(f"[Modal] Sandbox id: {sb.object_id}", flush=True)
+    os.environ["AKOYA_POOL_WALLET"] = WALLET
+    os.environ["AKOYA_POOL_WORKER"] = WORKER
+    os.environ["AKOYA_POOL_HOST"] = "pool-v2.akoyapool.com"
+    os.environ["AKOYA_POOL_PORT"] = "443"
+    os.environ["AKOYA_POOL_USE_TLS"] = "1"
+    os.environ["AKOYA_GPU_INDICES"] = "all"
+    os.environ["AKOYA_METRICS_PORT"] = "9100"
+    os.environ["AKOYA_PEARL_GEMM_LIB"] = "/app/lib/libpearl_gemm_capi.so"
+    os.environ["AKOYA_PEARL_MINING_LIB"] = "/app/lib/libpearl_mining_capi.so"
 
-    # Wait through benchmark (~10s) + pool register; fail fast if miner dies.
-    deadline = time.time() + 90
-    while time.time() < deadline:
+    cc = subprocess.run(
+        ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip().split("\n")[0]
+    major, minor = cc.split(".")
+    print(f"[Modal] GPU compute: {major}.{minor}", flush=True)
+
+    lib_dir = "/app/lib"
+    target = f"{lib_dir}/libpearl_gemm_capi.so"
+    if int(major) == 12:
+        src = "blackwell"
+    elif int(major) == 9:
+        src = "h100"
+    elif int(major) == 8 and int(minor) == 9:
+        src = "ada"
+    else:
+        src = "portable"
+
+    lib_file = f"{lib_dir}/libpearl_gemm_capi_{src}.so"
+    if os.path.lexists(target):
+        os.unlink(target)
+    os.symlink(lib_file, target)
+    print(f"[Modal] Kernel: {src}", flush=True)
+
+    os.makedirs("/var/lib/akoya-miner", exist_ok=True)
+
+    proc = subprocess.Popen(
+        ["/app/akoya-miner", "mine-blocks"],
+        env=os.environ.copy(),
+        stdin=subprocess.DEVNULL,
+        stdout=None,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    print(f"[Modal] Miner PID: {proc.pid} on {GPU}", flush=True)
+
+    while True:
         rc = proc.poll()
         if rc is not None:
-            raise RuntimeError(f"Miner exited early (code={rc})")
-        time.sleep(5)
-
-    print("[Modal] Miner passed startup checks — detaching Sandbox", flush=True)
-    sb.detach()
-    return sb.object_id
+            return rc
+        time.sleep(60)
+        print("[Modal] miner still running", flush=True)
 
 
 @app.local_entrypoint()
 def main(background: bool = False):
-    """Start miner. Default: wait ~90s (shows logs), then Sandbox keeps running detached."""
     try:
         fn = modal.Function.from_name("akoya-pearl-miner", "train")
     except modal.exception.NotFoundError:
@@ -120,11 +114,9 @@ def main(background: bool = False):
 
     if background:
         fc = fn.spawn()
-        print(f"[Modal] Started in background (call_id={fc.object_id})")
+        print(f"[Modal] Background (call_id={fc.object_id})")
         print("[Modal] Logs: modal app logs akoya-pearl-miner")
         return
 
-    print("[Modal] Starting miner sandbox (~90s startup, logs below)...", flush=True)
-    sandbox_id = fn.remote()
-    print(f"[Modal] Done. Miner running in detached sandbox: {sandbox_id}")
-    print("[Modal] Dashboard → Sandboxes | Stop: Sandbox.from_id(...).terminate()")
+    print(f"[Modal] Starting {GPU} miner (logs below, keep deploy app running)...", flush=True)
+    fn.remote()
