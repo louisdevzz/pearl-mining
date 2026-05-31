@@ -81,17 +81,23 @@ def train():
         timeout=TIMEOUT,
         idle_timeout=TIMEOUT,
     )
-    proc = sb.exec("bash", "-lc", _miner_bash())
+    from modal.sandbox import StreamType
+
+    proc = sb.exec(
+        "bash",
+        "-lc",
+        _miner_bash(),
+        stdout=StreamType.STDOUT,
+        stderr=StreamType.STDOUT,
+    )
     print(f"[Modal] Sandbox id: {sb.object_id}", flush=True)
 
     # Wait through benchmark (~10s) + pool register; fail fast if miner dies.
     deadline = time.time() + 90
     while time.time() < deadline:
-        if proc.poll() is not None:
-            out = proc.stdout.read() if proc.stdout else ""
-            raise RuntimeError(
-                f"Miner exited early (code={proc.returncode}). Output:\n{out}"
-            )
+        rc = proc.poll()
+        if rc is not None:
+            raise RuntimeError(f"Miner exited early (code={rc})")
         time.sleep(5)
 
     print("[Modal] Miner passed startup checks — detaching Sandbox", flush=True)
@@ -100,7 +106,8 @@ def train():
 
 
 @app.local_entrypoint()
-def main():
+def main(background: bool = False):
+    """Start miner. Default: wait ~90s (shows logs), then Sandbox keeps running detached."""
     try:
         fn = modal.Function.from_name("akoya-pearl-miner", "train")
     except modal.exception.NotFoundError:
@@ -111,8 +118,13 @@ def main():
         )
         raise SystemExit(1) from None
 
-    fc = fn.spawn()
-    print(f"[Modal] Launching miner sandbox (call_id={fc.object_id})")
-    print("[Modal] After ~90s, check: modal app logs akoya-pearl-miner")
-    print("[Modal] Dashboard → Sandboxes (find id above in function logs)")
-    print("[Modal] Stop: modal dashboard, or Sandbox.from_id(id).terminate() in Python")
+    if background:
+        fc = fn.spawn()
+        print(f"[Modal] Started in background (call_id={fc.object_id})")
+        print("[Modal] Logs: modal app logs akoya-pearl-miner")
+        return
+
+    print("[Modal] Starting miner sandbox (~90s startup, logs below)...", flush=True)
+    sandbox_id = fn.remote()
+    print(f"[Modal] Done. Miner running in detached sandbox: {sandbox_id}")
+    print("[Modal] Dashboard → Sandboxes | Stop: Sandbox.from_id(...).terminate()")
