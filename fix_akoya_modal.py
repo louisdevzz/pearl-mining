@@ -13,7 +13,7 @@ import modal
 app = modal.App("akoya-pearl-miner")
 
 WALLET = "prl1pw6q2dkd5zdkf3agvfyph6u0acyg7hs7aw9klxcv5ksc5s27r3gmq5yz7yt"
-WORKER = "worker2"
+WORKER = "worker3"
 GPU = "H100"
 TIMEOUT = 86400
 
