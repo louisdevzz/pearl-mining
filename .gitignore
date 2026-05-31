@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Modal
+.modal/
+
+# Logs & local run output
+*.log
+nohup.out
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
