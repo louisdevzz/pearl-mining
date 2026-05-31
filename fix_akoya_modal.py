@@ -1,7 +1,14 @@
 """
 Akoya Pearl Miner on Modal.com — Serverless H100 Mining
-Deploy: modal deploy akoya_modal.py
-Run:    modal run akoya_modal.py
+
+Deploy once:
+  modal deploy fix_akoya_modal.py
+
+Start miner (survives terminal / browser close):
+  modal run fix_akoya_modal.py
+
+Or without deploy (ephemeral):
+  modal run --detach fix_akoya_modal.py::train
 """
 
 import modal
@@ -73,16 +80,36 @@ def train():
         ["/app/akoya-miner", "mine-blocks"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
         env=os.environ,
     )
     print(f"[Modal] Miner PID: {proc.pid}", flush=True)
-    for line in iter(proc.stdout.readline, b""):
-        if not line:
-            break
-        print(line.decode(errors="replace").rstrip(), flush=True)
+
+    import threading
+
+    def pump():
+        for line in iter(proc.stdout.readline, b""):
+            if not line:
+                break
+            print(line.decode(errors="replace").rstrip(), flush=True)
+
+    threading.Thread(target=pump, daemon=True).start()
     return proc.wait()
 
 
 @app.local_entrypoint()
 def main():
-    train.remote()
+    """Spawn miner on the deployed app so it keeps running after this exits."""
+    try:
+        fn = modal.Function.from_name("akoya-pearl-miner", "train")
+    except modal.exception.NotFoundError:
+        print(
+            "[Modal] Deploy first: modal deploy fix_akoya_modal.py\n"
+            "[Modal] Or run detached: modal run --detach fix_akoya_modal.py::train"
+        )
+        raise SystemExit(1) from None
+
+    fc = fn.spawn()
+    print(f"[Modal] Miner started (call_id={fc.object_id})")
+    print("[Modal] Logs:  modal app logs akoya-pearl-miner")
+    print("[Modal] Stop:  modal app stop akoya-pearl-miner")
